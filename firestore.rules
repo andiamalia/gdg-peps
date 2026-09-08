@@ -1,0 +1,73 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function eventDoc(eventId) {
+      return get(/databases/$(database)/documents/events/$(eventId)).data;
+    }
+
+    function isOrganizer(eventId) {
+      return signedIn() && eventDoc(eventId).organizer_uid == request.auth.uid;
+    }
+
+    // Client may only set join fields. Profile/embedding/completeness come from Admin SDK.
+    function memberClientCreateOk() {
+      return request.resource.data.keys().hasAll(['display_name', 'joined_at', 'role', 'interview_status'])
+        && request.resource.data.interview_status in ['pending', 'in_progress']
+        && !('embedding' in request.resource.data)
+        && !('profile' in request.resource.data)
+        && !('profile_text' in request.resource.data)
+        && !('completeness' in request.resource.data);
+    }
+
+    function memberClientUpdateOk() {
+      return request.resource.data.diff(resource.data).affectedKeys()
+          .hasOnly(['display_name', 'interview_status', 'consent_at', 'consent_version'])
+        && (
+          !(request.resource.data.diff(resource.data).affectedKeys().hasAny(['interview_status']))
+          || request.resource.data.interview_status in ['pending', 'in_progress']
+        );
+    }
+
+    match /users/{uid} {
+      allow read: if signedIn();
+      allow create: if isOwner(uid)
+        && request.resource.data.keys().hasAll(['display_name', 'created_at']);
+      allow update: if isOwner(uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['display_name']);
+    }
+
+    match /events/{eventId} {
+      allow read: if signedIn();
+      allow create: if signedIn()
+        && request.resource.data.organizer_uid == request.auth.uid;
+      allow update: if isOrganizer(eventId);
+      allow delete: if isOrganizer(eventId);
+
+      match /members/{uid} {
+        allow read: if signedIn();
+        allow create: if isOwner(uid) && memberClientCreateOk();
+        allow update: if (isOwner(uid) && memberClientUpdateOk()) || isOrganizer(eventId);
+        allow delete: if isOwner(uid) || isOrganizer(eventId);
+
+        match /interview_messages/{messageId} {
+          allow read: if isOwner(uid) || isOrganizer(eventId);
+          allow write: if false;
+        }
+      }
+
+      match /matches/{matchId} {
+        allow read: if signedIn()
+          && resource.data.from_uid == request.auth.uid;
+        allow write: if false;
+      }
+    }
+  }
+}
